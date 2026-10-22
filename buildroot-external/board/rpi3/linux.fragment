@@ -1,0 +1,25 @@
+# What we need on top of the Raspberry Pi bcm2711_defconfig. The image has
+# no modprobe, so every driver we use is built in. trim-kernel-config.sh
+# merges this and writes linux.config, which is what Buildroot builds.
+
+# ALSA, USB MIDI/audio, the onboard 3.5 mm jack and I2S DACs
+CONFIG_SND=y
+CONFIG_SND_USB_AUDIO=y
+CONFIG_SND_BCM2835=y
+CONFIG_SND_SOC=y
+CONFIG_SND_BCM2835_SOC_I2S=y
+CONFIG_SND_BCM2708_SOC_HIFIBERRY_DAC=y
+CONFIG_SND_BCM2708_SOC_HIFIBERRY_DACPLUS=y
+CONFIG_SND_SOC_PCM512x_I2C=y
+CONFIG_I2C_BCM2835=y
+
+# The FAT partitions
+CONFIG_NLS_ISO8859_1=y
+
+CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y
+# CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND is not set
+
+# No radios
+# CONFIG_BT is not set
+# CONFIG_CFG80211 is not set
+# CONFIG_WLAN is not set

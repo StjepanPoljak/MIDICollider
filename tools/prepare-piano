@@ -1,0 +1,57 @@
+#!/bin/bash
+# Turns the Salamander Grand Piano (Yamaha C5, CC BY 3.0, Alexander Holm;
+# https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html, the
+# SFZ+FLAC download) into samples for midid:
+#
+#   tools/prepare-piano <extracted SalamanderGrandPiano-SFZ+FLAC dir>
+#
+# Writes data/samples/piano/*.flac and the matching "sample" lines into
+# data/midid.conf, between the "piano samples" markers.
+#
+# scsynth keeps every sample in RAM as 32-bit float, so this takes 4 of the
+# 16 velocity layers and cuts each sample to LENGTH seconds (fading out over
+# the last FADE): about 360 MB with the defaults, on a Pi with ~900 MB.
+set -euo pipefail
+
+src="${1:?usage: $0 <SalamanderGrandPiano-SFZ+FLAC dir>}/samples"
+root="$(cd "$(dirname "$0")/.." && pwd)"
+out="$root/data/samples/piano"
+conf="$root/data/midid.conf"
+LENGTH=${LENGTH:-9}
+FADE=${FADE:-2}
+
+# Salamander layer -> the velocity it represents (middle of its SFZ range)
+declare -A layers=([4]=40 [8]=60 [12]=92 [16]=124)
+pcs=(C C# D D# E F F# G G# A A# B)
+
+[[ -d $src ]] || { echo "no $src" >&2; exit 1; }
+mkdir -p "$out"
+lines=$(mktemp)
+trap 'rm -f "$lines"' EXIT
+
+for f in "$src"/*v4.flac; do
+	name=$(basename "$f" v4.flac)		# e.g. D#4
+	pc=${name%?}; oct=${name: -1}
+	for i in "${!pcs[@]}"; do [[ ${pcs[i]} == "$pc" ]] && break; done
+	note=$(( (oct + 1) * 12 + i ))		# C4 = 60
+	for l in 4 8 12 16; do
+		dst=${name//#/s}v$l.flac		# recvd paths can't contain '#'
+		ffmpeg -nostdin -loglevel error -y -i "$src/${name}v$l.flac" \
+			-t "$LENGTH" -af "afade=t=out:st=$((LENGTH - FADE)):d=$FADE" \
+			-c:a flac -sample_fmt s32 -bits_per_raw_sample 24 "$out/$dst"
+		echo "$note samples/piano/$dst ${layers[$l]}" >>"$lines"
+	done
+	echo "  $name (note $note)"
+done
+
+begin="# --- piano samples (written by tools/prepare-piano) ---"
+end="# --- end of piano samples ---"
+{
+	awk -v b="$begin" -v e="$end" '$0 == b { skip = 1 } !skip { print } $0 == e { skip = 0 }' "$conf"
+	echo "$begin"
+	echo "# sample <note> <path> <velocity the layer was recorded at>"
+	sort -n "$lines" | sed 's/^/sample /'
+	echo "$end"
+} >"$conf.new"
+mv "$conf.new" "$conf"
+echo "wrote $(wc -l <"$lines") samples to $out ($(du -sh "$out" | cut -f1)) and $conf"

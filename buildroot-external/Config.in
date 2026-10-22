@@ -1,0 +1,2 @@
+source "$BR2_EXTERNAL_MIDICOLLIDER_PATH/package/midicollider/Config.in"
+source "$BR2_EXTERNAL_MIDICOLLIDER_PATH/package/supercollider/Config.in"

@@ -1,0 +1,26 @@
+# scsynth command line, one argument per line (so device names may contain
+# spaces). Edit, upload with "tools/pi put data/scsynth.args", then "tools/pi restart".
+-u
+57110
+# localhost only: midid and recvd are the only clients
+-B
+127.0.0.1
+-R
+0
+-i
+0
+-o
+2
+-S
+48000
+# control block size and hardware buffer size (frames)
+-z
+64
+-Z
+128
+# realtime memory in kB, raise for big delay lines / many voices
+-m
+65536
+# audio device, e.g. for a HiFiBerry DAC (check the name scsynth prints at startup)
+#-H
+#snd_rpi_hifiberry_dac: HiFiBerry DAC HiFi pcm5102a-hifi-0 (hw:0,0)

@@ -1,0 +1,5 @@
+config BR2_PACKAGE_MIDICOLLIDER
+	bool "midicollider"
+	help
+	  The MIDICollider programs, built statically from ../src:
+	  init (installed as /init, PID 1), midid and recvd.

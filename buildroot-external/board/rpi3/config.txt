@@ -1,0 +1,27 @@
+# Firmware config for MIDICollider on a Raspberry Pi 3B+. Lives on the boot
+# partition, so it can be edited on any laptop.
+# https://www.raspberrypi.com/documentation/computers/config_txt.html
+
+arm_64bit=1
+kernel=Image
+initramfs rootfs.cpio.gz followkernel
+
+start_file=start.elf
+fixup_file=fixup.dat
+
+disable_splash=1
+boot_delay=0
+gpu_mem=64
+
+# No radios. This also frees the PL011 UART for the serial console on
+# GPIO 14 (TX) / 15 (RX), 115200 baud.
+dtoverlay=disable-wifi
+dtoverlay=disable-bt
+enable_uart=1
+
+# Onboard 3.5 mm jack, for first tests
+dtparam=audio=on
+
+# I2S DAC: uncomment yours (and comment out dtparam=audio above)
+#dtoverlay=hifiberry-dac
+#dtoverlay=hifiberry-dacplus

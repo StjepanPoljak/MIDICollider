@@ -1,0 +1,1 @@
+console=tty1 console=ttyAMA0,115200 mc_ip=10.0.0.2/24

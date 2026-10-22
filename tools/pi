@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Talk to recvd on the Pi. Needs nothing but bash (uses /dev/tcp).
+#
+#   pi put <file> [remote-path]   upload; default path by extension:
+#                                 .scsyndef -> synthdefs/, audio -> samples/
+#   pi del <remote-path>
+#   pi ls [remote-dir]
+#   pi get <remote-path> [file]   download (to stdout without a file)
+#   pi log [old]                  this boot's log, or the previous boot's
+#   pi restart                    restart scsynth and midid
+#
+# PI_HOST (default 10.0.0.2) and PI_PORT (default 9000) select the Pi.
+set -euo pipefail
+
+host=${PI_HOST:-10.0.0.2}
+port=${PI_PORT:-9000}
+
+usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+[[ $# -ge 1 ]] || usage
+
+connect() { exec 3<>"/dev/tcp/$host/$port"; }
+
+case $1 in
+put)
+	[[ $# -ge 2 ]] || usage
+	file=$2
+	name=$(basename "$file")
+	if [[ $# -ge 3 ]]; then
+		dst=$3
+	else
+		case ${name,,} in
+		*.scsyndef) dst=synthdefs/$name ;;
+		*.wav|*.aif|*.aiff|*.flac) dst=samples/$name ;;
+		*) dst=$name ;;
+		esac
+	fi
+	size=$(stat -c %s "$file")
+	connect
+	printf 'PUT %s %s\n' "$size" "$dst" >&3
+	cat "$file" >&3
+	;;
+del)
+	[[ $# -eq 2 ]] || usage
+	connect
+	printf 'DEL %s\n' "$2" >&3
+	;;
+ls)
+	connect
+	printf 'LS %s\n' "${2:-}" >&3
+	;;
+get|log)
+	if [[ $1 == log ]]; then
+		[[ $# -le 2 ]] || usage
+		src=log.txt; [[ ${2:-} == old ]] && src=log.old.txt
+		out=
+	else
+		[[ $# -ge 2 && $# -le 3 ]] || usage
+		src=$2 out=${3:-}
+	fi
+	connect
+	printf 'GET %s\n' "$src" >&3
+	IFS= read -r hdr <&3 || hdr="ERR no reply"
+	if [[ $hdr != OK* ]]; then
+		printf '%s\n' "$hdr" >&2
+		exit 1
+	fi
+	if [[ -n $out ]]; then cat <&3 >"$out"; else cat <&3; fi
+	exit 0
+	;;
+restart)
+	connect
+	printf 'RESTART\n' >&3
+	;;
+*)
+	usage
+	;;
+esac
+
+reply=$(cat <&3)
+printf '%s\n' "$reply"
+[[ $reply != ERR* ]]

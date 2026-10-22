@@ -1,0 +1,18 @@
+config BR2_PACKAGE_SUPERCOLLIDER
+	bool "supercollider"
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	select BR2_PACKAGE_LIBSNDFILE
+	select BR2_PACKAGE_FFTW
+	select BR2_PACKAGE_FFTW_SINGLE
+	select BR2_PACKAGE_PORTAUDIO
+	select BR2_PACKAGE_PORTAUDIO_ALSA
+	help
+	  The SuperCollider synthesis server (scsynth) and its core
+	  UGen plugins, using PortAudio on ALSA. sclang, the IDE and
+	  supernova are not built.
+
+	  https://supercollider.github.io/
+
+comment "supercollider needs a toolchain w/ C++, threads"
+	depends on !BR2_INSTALL_LIBSTDCPP || !BR2_TOOLCHAIN_HAS_THREADS

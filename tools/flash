@@ -1,0 +1,52 @@
+#!/bin/bash
+# Writes the SD card image to a card, then runs verify-card on it.
+#
+#   tools/flash /dev/mmcblk0              (or: make flash DEV=/dev/mmcblk0)
+#   tools/flash /dev/sdX path/to/sdcard.img
+#
+# Runs as you and uses sudo only for the write and the read-back. Refuses
+# anything that isn't a whole SD/USB disk, or that has a partition mounted
+# outside /media or /run/media (i.e. one of your system disks).
+set -euo pipefail
+
+dev="${1:-}"
+img="${2:-$(dirname "$0")/../output/images/sdcard.img}"
+
+die() { echo "flash: $*" >&2; exit 1; }
+
+[[ -n $dev ]] || die "usage: $0 /dev/<card> [image]   (lsblk shows the card)"
+[[ -b $dev ]] || die "$dev is not a block device"
+[[ -f $img ]] || die "no image at $img (run make image)"
+
+[[ $(lsblk -dno TYPE "$dev") == disk ]] || die "$dev is a partition; give the whole card (e.g. /dev/mmcblk0)"
+tran=$(lsblk -dno TRAN "$dev")
+[[ $tran == mmc || $tran == usb ]] || die "$dev is on '$tran', not an SD/USB card reader"
+
+while read -r mp; do
+	[[ -z $mp || $mp == /media/* || $mp == /run/media/* ]] ||
+		die "$dev has a partition mounted at $mp; refusing"
+done < <(lsblk -lno MOUNTPOINTS "$dev")
+
+img_size=$(stat -c %s "$img")
+dev_size=$(lsblk -bdno SIZE "$dev")
+(( dev_size >= img_size )) || die "$dev ($dev_size bytes) is smaller than the image ($img_size bytes)"
+
+echo "Image:  $img ($((img_size / 1048576)) MiB)"
+echo "Card:   $dev"
+lsblk -o NAME,SIZE,MODEL,LABEL,MOUNTPOINTS "$dev"
+echo
+[[ -t 0 ]] || die "needs a terminal (for the confirmation and sudo's password); run it in your own shell"
+read -rp "Everything on $dev will be erased. Type 'yes' to continue: " answer
+[[ $answer == yes ]] || die "cancelled"
+
+# Desktops auto-mount cards; unmount every partition before writing.
+for part in $(lsblk -lnpo NAME "$dev" | tail -n +2); do
+	if findmnt -rn -S "$part" >/dev/null; then
+		udisksctl unmount -b "$part" >/dev/null 2>&1 || sudo umount "$part"
+	fi
+done
+
+echo "Writing..."
+sudo dd if="$img" of="$dev" bs=4M conv=fsync oflag=direct status=progress
+
+exec "$(dirname "$0")/verify-card" "$dev" "$img"

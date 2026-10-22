@@ -1,0 +1,29 @@
+#!/bin/bash
+# Compares a written card with the image, then powers the card off so it's
+# safe to pull. tools/flash runs this after writing; run it on its own to
+# re-check a card:
+#
+#   tools/verify-card /dev/mmcblk0        (or: make verify DEV=/dev/mmcblk0)
+#   tools/verify-card /dev/sdX path/to/sdcard.img
+set -euo pipefail
+
+dev="${1:-}"
+img="${2:-$(dirname "$0")/../output/images/sdcard.img}"
+
+die() { echo "verify-card: $*" >&2; exit 1; }
+
+[[ -n $dev ]] || die "usage: $0 /dev/<card> [image]"
+[[ -b $dev ]] || die "$dev is not a block device"
+[[ -f $img ]] || die "no image at $img"
+
+echo "Verifying $dev against $img..."
+# Drop the cached blocks so the read comes from the card. (O_DIRECT reads
+# fail with EINVAL on some card readers.)
+sudo blockdev --flushbufs "$dev"
+sudo cmp -n "$(stat -c %s "$img")" "$img" "$dev" ||
+	die "read-back differs from the image (or the read failed); try another card or reader"
+echo "Verified."
+
+sudo partprobe "$dev" 2>/dev/null || sudo blockdev --rereadpt "$dev" 2>/dev/null || true
+udisksctl power-off -b "$dev" >/dev/null 2>&1 || sync
+echo "Done. Remove the card and put it in the Pi."
