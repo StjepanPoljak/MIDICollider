@@ -78,16 +78,11 @@ format: default/per-channel synth, program change map, CC map, bend range and sa
 The default synth is `piano`: the [Salamander Grand Piano](https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html)
 (Yamaha C5, by Alexander Holm, CC BY 3.0), sampled every minor third. It uses 4 of the
 16 velocity layers, cut to 9 s each, because scsynth keeps samples in RAM as
-32-bit float (about 360 MB). The samples aren't in this repo; to recreate them:
-
-```sh
-mkdir -p dl && cd dl
-curl -LO 'https://freepats.zenvoid.org/Piano/SalamanderGrandPiano/SalamanderGrandPiano-SFZ+FLAC-V3+20200602.tar.gz'
-tar xzf SalamanderGrandPiano-SFZ+FLAC-V3+20200602.tar.gz && cd ..
-tools/prepare-piano dl/SalamanderGrandPiano-SFZ+FLAC-V3+20200602   # LENGTH=12 for longer notes
-```
-
-That writes `data/samples/piano/` and the `sample` lines in `data/midid.conf`. midid
+32-bit float (about 360 MB). The samples aren't in this repo: `make image` runs
+`make piano` first, which downloads the pack (707 MB, checked against a SHA-256),
+extracts the 4 layers and runs `tools/prepare-piano`. That writes
+`data/samples/piano/` and the `sample` lines in `data/midid.conf`. For longer notes:
+`LENGTH=12 tools/prepare-piano dl/SalamanderGrandPiano-SFZ+FLAC-V3+20200602`. midid
 picks the nearest sample in pitch and, of its layers, the one recorded nearest to the
 played velocity; the `piano` def scales it by `vel/svel` to fill the gap between layers.
 scsynth loads the samples at startup, which takes a while on the Pi: keys stay silent
@@ -115,13 +110,22 @@ holds its `/dev/snd/midiC*` open.
 
 ## Building the SD card image
 
+On Debian/Ubuntu, install what Buildroot and the piano preparation need:
+
 ```sh
-make image                 # clones Buildroot 2026.02.3 on first run, then builds
+sudo apt install build-essential git rsync bc cpio unzip file wget curl ffmpeg
+```
+
+Then, from a fresh clone:
+
+```sh
+make image                 # clones Buildroot 2026.02.3, prepares the piano, builds
 make flash DEV=/dev/mmcblk0   # writes and verifies the card; check the device with lsblk
 ```
 
-The first build downloads about 600 MB and needs about 5 GB of disk. Later runs
-only rebuild what changed: `make image` always rebuilds the `src/` programs.
+The first build downloads about 1.3 GB (600 MB of toolchain and sources, 707 MB
+of piano) and needs about 6 GB of disk. Later runs only rebuild what changed:
+`make image` always rebuilds the `src/` programs.
 Use `make -C output menuconfig` to change the Buildroot configuration.
 
 `buildroot-external/` is a standard `BR2_EXTERNAL` tree:

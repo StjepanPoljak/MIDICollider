@@ -25,6 +25,7 @@ declare -A layers=([4]=40 [8]=60 [12]=92 [16]=124)
 pcs=(C C# D D# E F F# G G# A A# B)
 
 [[ -d $src ]] || { echo "no $src" >&2; exit 1; }
+command -v ffmpeg >/dev/null || { echo "prepare-piano needs ffmpeg (apt install ffmpeg)" >&2; exit 1; }
 mkdir -p "$out"
 lines=$(mktemp)
 trap 'rm -f "$lines"' EXIT
