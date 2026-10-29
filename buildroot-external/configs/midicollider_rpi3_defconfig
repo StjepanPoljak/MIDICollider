@@ -9,7 +9,8 @@ BR2_TOOLCHAIN_EXTERNAL=y
 BR2_TOOLCHAIN_EXTERNAL_BOOTLIN=y
 BR2_TOOLCHAIN_EXTERNAL_BOOTLIN_AARCH64_MUSL_STABLE=y
 
-BR2_GLOBAL_PATCH_DIR="board/raspberrypi/patches"
+# Our own kernel fixes live in patches/linux/
+BR2_GLOBAL_PATCH_DIR="board/raspberrypi/patches $(BR2_EXTERNAL_MIDICOLLIDER_PATH)/patches"
 
 # No init system, no shell, no BusyBox: our /init is PID 1
 BR2_TARGET_GENERIC_HOSTNAME="midicollider"

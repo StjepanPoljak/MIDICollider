@@ -139,6 +139,7 @@ Use `make -C output menuconfig` to change the Buildroot configuration.
 | `board/rpi3/linux.fragment` | what we add to `bcm2711_defconfig`: ALSA, USB audio, onboard jack, HiFiBerry DAC/DAC+; no Wi-Fi/BT |
 | `board/rpi3/config.txt`, `cmdline.txt` | firmware config, serial console on GPIO 14/15, `mc_ip=` |
 | `board/rpi3/genimage.cfg` | p1 boot FAT (64 MB), p2 data FAT (1 GB) seeded from `data/` |
+| `patches/linux/` | kernel patches, applied on top of the Raspberry Pi tree (see below) |
 
 `make synthdefs` recompiles `tools/synthdefs.scd` into `data/synthdefs/`, so the
 image boots with something to play.
@@ -156,6 +157,16 @@ make -C output linux-reconfigure all
 For one-off changes, `make -C output linux-menuconfig` followed by
 `make -C output linux-update-defconfig` also works, but the script won't know
 about them.
+
+**Kernel patches:** `patches/linux/0001-ALSA-usb-audio-don-t-resubmit-MIDI-URBs-at-once-on-E.patch`
+fixes a keyboard going silent after it's switched off and on. While a
+bus-powered keyboard powers down it answers with stalls (`-EPIPE`), and
+snd-usb-audio resubmitted those URBs at once and printed `urb status -32` for
+each. On the Pi that loop keeps CPU 0, which handles all interrupts, too busy
+to process the hub's disconnect, so the keyboard stayed silent until it was
+replugged. With the patch the URBs are retried every 100 ms without a message,
+the disconnect comes through and midid reopens the keyboard by itself.
+After a kernel bump, check the patch still applies: `make -C output linux-dirclean linux`.
 
 **Debugging:** you don't need a serial cable.
 

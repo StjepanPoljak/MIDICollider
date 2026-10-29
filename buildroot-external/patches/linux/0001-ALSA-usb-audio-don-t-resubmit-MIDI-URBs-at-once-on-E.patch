@@ -1,0 +1,55 @@
+From 715c8c2eaf7c6577a4798d309eeb2ef19c98b9ed Mon Sep 17 00:00:00 2001
+From: Stjepan Poljak <stjepan.poljak@gmail.com>
+Date: Thu, 29 Oct 2026 17:16:14 +0100
+Subject: [PATCH] ALSA: usb-audio: don't resubmit MIDI URBs at once on -EPIPE
+
+When a USB MIDI device answers with a stall, as a bus-powered keyboard
+does while it is being switched off, snd_usbmidi_urb_error() falls
+through to the default case: it logs "urb status -32" and returns 0, so
+the completion handler resubmits the URB at once. That fails the same
+way, so the URBs loop, logging every failure, until the disconnect is
+processed.
+
+On a Raspberry Pi 3B+ with a keyboard behind the onboard hub, that
+disconnect is never processed. Printing to the framebuffer and serial
+consoles holds the loop to about 250 messages a second, and all
+interrupts are handled on CPU 0, so the hub's port change isn't handled:
+the keyboard stays silent until it is replugged. With loglevel=3, the
+same kernel processes the disconnect 0.04-0.24 s after the first error
+and the keyboard works again.
+
+Treat -EPIPE like the other errors seen while a device goes away: retry
+from the error timer after ERROR_DELAY_JIFFIES, without a message. An
+endpoint that is really halted wasn't cleared before either; it is now
+retried every 100 ms instead of continuously.
+
+Tested on the Raspberry Pi 3B+ (rpi-6.12.y, dwc_otg) with the default
+console settings: after each off/on the disconnect is processed, the
+keyboard re-enumerates and plays, and nothing is logged for the stall.
+
+Assisted-by: LLM
+Signed-off-by: Stjepan Poljak <stjepan.poljak@gmail.com>
+---
+ sound/usb/midi.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/sound/usb/midi.c b/sound/usb/midi.c
+index e3d157554061..5604c3fdbe3b 100644
+--- a/sound/usb/midi.c
++++ b/sound/usb/midi.c
+@@ -194,10 +194,11 @@ static int snd_usbmidi_urb_error(const struct urb *urb)
+ 	case -ESHUTDOWN:
+ 	case -ENODEV:
+ 		return -ENODEV;
+-	/* errors that might occur during unplugging */
++	/* errors that might occur during unplugging or switching off */
+ 	case -EPROTO:
+ 	case -ETIME:
+ 	case -EILSEQ:
++	case -EPIPE:
+ 		return -EIO;
+ 	default:
+ 		dev_err(&urb->dev->dev, "urb status %d\n", urb->status);
+-- 
+2.53.0
+
