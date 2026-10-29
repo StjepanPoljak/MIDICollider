@@ -16,7 +16,15 @@
  * scsynth ignores controls a def doesn't have.
  *
  * Config: <data>/midid.conf, re-read whenever it changes (see data/midid.conf).
+ *
+ * Idle: after "idle" minutes without MIDI input and with no key held, we ask
+ * init (SIGUSR1) to clock the CPUs down, and the next input asks it to clock
+ * them up again (SIGUSR2). Only when started by init (MC_INIT_PID).
+ *
+ * Watchdog: if scsynth stops answering for 10 s without exiting, we ask init
+ * to restart it (SIGRTMIN), again every minute until it answers.
  */
+#include <signal.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -38,6 +46,9 @@
 #define MAX_CC		32
 #define MAX_SAMPLES	512
 #define NAME		64
+#define HUNG_AFTER	10.0		/* s without a reply before we call scsynth hung */
+#define HUNG_RETRY	60.0		/* s before asking init again */
+#define SIG_HUNG	SIGRTMIN	/* to init: scsynth is hung, restart it */
 
 struct ccmap {
 	int num;
@@ -59,6 +70,7 @@ static struct {
 	struct ccmap cc[MAX_CC];
 	int ncc;
 	float bend_range;
+	double idle;			/* seconds, 0 = never */
 	struct sample sample[MAX_SAMPLES];
 	int nsamples;
 } cfg;
@@ -75,8 +87,12 @@ static const char *dev_dir = "/dev/snd";
 static char conf_path[512];
 static int osc_fd;
 static int server_up;
-static double last_reply;
+static double last_reply;		/* 0 = scsynth never answered */
+static double asked_restart;		/* when we last reported scsynth hung */
 static int32_t next_node = NODE_FIRST;
+static pid_t init_pid;			/* 0 = not started by init: never idle */
+static int idle;			/* init has clocked the CPUs down */
+static double last_input;
 
 static int32_t node[16][128];		/* sounding node per key, 0 = none */
 static uint8_t sustained[16][128];	/* key released, held by the pedal */
@@ -135,6 +151,7 @@ static void load_config(void)
 	memset(&cfg, 0, sizeof cfg);
 	snprintf(cfg.deflt, sizeof cfg.deflt, "default");
 	cfg.bend_range = 2;
+	cfg.idle = 15 * 60;
 	memset(cur_synth, 0, sizeof cur_synth);
 	memset(cc_set, 0, sizeof cc_set);
 
@@ -171,6 +188,8 @@ static void load_config(void)
 			c->exp = argc > 5 && !strcmp(argv[5], "exp") && c->lo > 0 && c->hi > 0;
 		} else if (!strcmp(argv[0], "bend") && argc == 2) {
 			cfg.bend_range = strtof(argv[1], NULL);
+		} else if (!strcmp(argv[0], "idle") && argc == 2) {
+			cfg.idle = strtod(argv[1], NULL) * 60;
 		} else if (!strcmp(argv[0], "sample") && (argc == 3 || argc == 4) && cfg.nsamples < MAX_SAMPLES) {
 			struct sample *s = &cfg.sample[cfg.nsamples++];
 
@@ -362,12 +381,44 @@ static void dispatch(uint8_t status, uint8_t d1, uint8_t d2)
 	}
 }
 
+/* Ends idle on the first input, before the input is handled. */
+static void input_seen(void)
+{
+	last_input = now();
+	if (!idle)
+		return;
+	idle = 0;
+	kill(init_pid, SIGUSR2);
+	fprintf(stderr, "midid: input, waking up\n");
+}
+
+static int any_key_down(void)
+{
+	for (int ch = 0; ch < 16; ch++)
+		for (int k = 0; k < 128; k++)
+			if (node[ch][k])
+				return 1;
+	return 0;
+}
+
+static void check_idle(double t)
+{
+	if (idle || !init_pid || cfg.idle <= 0 || !server_up)
+		return;
+	if (t - last_input < cfg.idle || any_key_down())
+		return;
+	idle = 1;
+	kill(init_pid, SIGUSR1);
+	fprintf(stderr, "midid: no input for %g min, going idle\n", cfg.idle / 60);
+}
+
 static void midi_byte(struct dev *d, uint8_t b)
 {
 	int need;
 
 	if (b >= 0xf8)			/* realtime: clock, active sensing... */
 		return;
+	input_seen();
 	if (b == 0xf0) {
 		d->sysex = 1;
 		return;
@@ -493,6 +544,23 @@ static void handle_replies(void)
 	}
 }
 
+/* scsynth runs our ping from its audio thread, so no reply means its audio
+ * has stopped. One that exits is restarted by init, but one that hangs
+ * stays silent for good: ask init to restart it. Only once it has answered,
+ * so a slow start isn't a hang. (Seen once after a night with scsynth paused
+ * by SIGSTOP, which idle no longer does.) */
+static void check_hung(double t)
+{
+	if (!init_pid || !last_reply || server_up)
+		return;
+	if (t - last_reply < HUNG_AFTER || t - asked_restart < HUNG_RETRY)
+		return;
+	asked_restart = t;
+	kill(init_pid, SIG_HUNG);
+	fprintf(stderr, "midid: no reply from scsynth for %.0f s, asking init to restart it\n",
+		t - last_reply);
+}
+
 int main(int argc, char **argv)
 {
 	struct stat st;
@@ -511,6 +579,9 @@ int main(int argc, char **argv)
 		}
 	}
 	snprintf(conf_path, sizeof conf_path, "%s/midid.conf", data_dir);
+	if (getenv("MC_INIT_PID") && atoi(getenv("MC_INIT_PID")) == getppid())
+		init_pid = getppid();
+	last_input = now();
 	osc_fd = osc_open(port);
 	if (osc_fd < 0) {
 		perror("midid: socket");
@@ -538,6 +609,7 @@ int main(int argc, char **argv)
 				if (server_up)
 					load_buffers(0);
 			}
+			check_idle(t);
 			osc_init(&m, "/g_queryTree");
 			osc_i(&m, GROUP);
 			osc_i(&m, 0);
@@ -546,6 +618,7 @@ int main(int argc, char **argv)
 				fprintf(stderr, "midid: lost scsynth\n");
 				server_up = 0;
 			}
+			check_hung(t);
 		}
 
 		pfd[0].fd = osc_fd;

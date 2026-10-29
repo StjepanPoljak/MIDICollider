@@ -176,6 +176,22 @@ After a kernel bump, check the patch still applies: `make -C output linux-dircle
 - **`log.txt` on the data partition:** the kernel log, init's messages and every
   service's output, with uptime stamps. The previous boot's is `log.old.txt`.
   Put the card in the laptop, or use `tools/pi log` over Ethernet.
+  Once a minute init adds a line like
+  `init: stats: 52.1 C, 1400 MHz, load 9.0% (irq 0.4%, softirq 1.1%), active, top: scsynth 31.0%, ...`:
+  SoC temperature, CPU clock, load across all four cores (interrupt time
+  separately, as it belongs to no process), whether it's idle, and the busiest
+  processes, each as a share of one core like `top`.
+- **Idle:** after `idle` minutes without MIDI input (`midid.conf`, default 15,
+  0 = never), midid has init switch the CPUs to the powersave governor
+  (600 MHz). The next key switches them back; the log shows
+  `init: idle, CPUs on powersave` / `init: awake, CPUs on performance`.
+  scsynth keeps running: pausing it stops the audio stream, and the onboard
+  jack clicks when the stream starts again.
+- **Watchdog:** midid pings scsynth once a second, and scsynth answers from
+  its audio thread. If scsynth stops answering for 10 s without exiting,
+  midid logs `midid: no reply from scsynth for 10 s, asking init to restart it`,
+  and init kills scsynth (`init: scsynth (pid N) hung, killing it`) and
+  starts a new one, which then reloads the samples.
 - **HDMI:** the console is on the screen as well.
 - **Serial**, if you have a 3.3 V USB-serial adapter: GPIO 14/15, 115200 baud.
 

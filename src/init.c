@@ -11,7 +11,20 @@
  * with the kernel log, to <data>/log.txt (the previous boot's is log.old.txt),
  * so a boot can be debugged without a serial cable: read the card on a
  * laptop, or fetch it with "tools/pi log". The green ACT LED switches to a
- * heartbeat once init is supervising.
+ * heartbeat once init is supervising. Once a minute it logs an "init: stats"
+ * line: SoC temperature, CPU clock, CPU load and the busiest processes.
+ *
+ * Watchdog: midid sends SIGRTMIN when scsynth has stopped answering without
+ * exiting. init then kills it (SIGKILL: a hung process may ignore SIGTERM),
+ * and restarts it like any service that exits. Ignored for a scsynth that
+ * started less than 20 s ago.
+ *
+ * Idle: midid sends SIGUSR1 after a while without MIDI input (see "idle" in
+ * midid.conf) and SIGUSR2 on the next event. init then puts the CPUs on the
+ * powersave governor, and back on performance on wake. scsynth keeps
+ * running: paused, its audio stream would stop, and the onboard jack clicks
+ * when a stream stops and starts again. Idle, it only costs about 1% of
+ * one core anyway.
  *
  * When not running as PID 1 it skips the system setup and only supervises,
  * which is handy for testing on a laptop: MC_DATA=./data ./build/init
@@ -19,6 +32,8 @@
  * Kernel command line (cmdline.txt) parameters reach us as env variables:
  *   mc_ip=10.0.0.2/24   address for eth0, or "off"
  */
+#include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <net/if.h>
@@ -41,6 +56,10 @@
 #define BOOT_DEV	"/dev/mmcblk0p1"
 #define DATA_DEV	"/dev/mmcblk0p2"
 #define LOG_MAX		(4 << 20)	/* rotate log.txt beyond this */
+#define STATS_PERIOD	60		/* seconds between "init: stats" lines */
+#define HUNG_GRACE	20		/* s after start before midid may call scsynth hung */
+#define STATS_TOP	4		/* busiest processes listed */
+#define MAX_PROCS	512
 
 struct service {
 	const char *name;
@@ -70,6 +89,7 @@ static int console_fd = -1;
 static int log_rd = -1;		/* read end of our stdout/stderr pipe */
 static pid_t logger_pid;
 static double logger_next;
+static int idle;		/* CPUs on powersave */
 
 static double now(void)
 {
@@ -255,6 +275,181 @@ static void start_logger(void)
 	logger_next = now() + 1;
 }
 
+static long read_long(const char *path)
+{
+	char buf[32];
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	ssize_t n;
+
+	if (fd < 0)
+		return -1;
+	n = read(fd, buf, sizeof buf - 1);
+	close(fd);
+	if (n <= 0)
+		return -1;
+	buf[n] = 0;
+	return strtol(buf, NULL, 10);
+}
+
+static void set_governor(const char *gov)
+{
+	char path[128];
+
+	if (getpid() != 1)
+		return;
+	for (int cpu = 0; cpu < 4; cpu++) {
+		snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor", cpu);
+		write_file(path, gov);
+	}
+}
+
+struct proc_ticks {
+	int pid;
+	unsigned long long ticks;	/* utime + stime, all threads */
+	char comm[16];
+};
+
+/* Fills p with every process's CPU time so far; returns how many. */
+static int read_procs(struct proc_ticks *p, int max)
+{
+	struct dirent *e;
+	DIR *dir = opendir("/proc");
+	int n = 0;
+
+	if (!dir)
+		return 0;
+	while ((e = readdir(dir)) && n < max) {
+		char path[300], buf[512], *open_paren, *close_paren;
+		unsigned long long utime, stime;
+		ssize_t len;
+		int fd;
+
+		if (!isdigit((unsigned char)e->d_name[0]))
+			continue;
+		snprintf(path, sizeof path, "/proc/%s/stat", e->d_name);
+		fd = open(path, O_RDONLY | O_CLOEXEC);
+		if (fd < 0)
+			continue;
+		len = read(fd, buf, sizeof buf - 1);
+		close(fd);
+		if (len <= 0)
+			continue;
+		buf[len] = 0;
+		/* "pid (comm) state ppid ...": comm may contain spaces and parens */
+		open_paren = strchr(buf, '(');
+		close_paren = strrchr(buf, ')');
+		if (!open_paren || !close_paren || close_paren < open_paren)
+			continue;
+		if (sscanf(close_paren + 1, " %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu",
+			   &utime, &stime) != 2)
+			continue;
+		p[n].pid = atoi(buf);
+		p[n].ticks = utime + stime;
+		snprintf(p[n].comm, sizeof p[n].comm, "%.*s",
+			 (int)(close_paren - open_paren - 1), open_paren + 1);
+		n++;
+	}
+	closedir(dir);
+	return n;
+}
+
+/* The "init: stats" line, so a hot or slow Pi can be diagnosed from log.txt.
+ * Load is the share of all CPUs; irq and softirq time belongs to no process
+ * (USB on the Pi spends a lot of it), so it's listed on its own. Process
+ * figures are the share of one CPU, like top's. */
+static void log_stats(void)
+{
+	static struct proc_ticks prev[MAX_PROCS], cur[MAX_PROCS];
+	static unsigned long long prev_cpu[8];
+	static double prev_t;
+	static int nprev = -1;
+	unsigned long long cpu[8] = { 0 }, total = 0, busy, delta[MAX_PROCS];
+	double t = now(), hz = sysconf(_SC_CLK_TCK), span;
+	long temp = read_long("/sys/class/thermal/thermal_zone0/temp");
+	long khz = read_long("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq");
+	char line[512];
+	int ncur, len;
+	FILE *f;
+
+	/* cpu  user nice system idle iowait irq softirq steal */
+	if ((f = fopen("/proc/stat", "r"))) {
+		if (fscanf(f, "cpu %llu %llu %llu %llu %llu %llu %llu %llu", &cpu[0], &cpu[1],
+			   &cpu[2], &cpu[3], &cpu[4], &cpu[5], &cpu[6], &cpu[7]) != 8)
+			memset(cpu, 0, sizeof cpu);
+		fclose(f);
+	}
+	ncur = read_procs(cur, MAX_PROCS);
+	if (nprev < 0)
+		goto keep;		/* first call: nothing to compare with yet */
+
+	for (int i = 0; i < 8; i++)
+		total += cpu[i] - prev_cpu[i];
+	busy = total - (cpu[3] - prev_cpu[3]) - (cpu[4] - prev_cpu[4]);
+	if (!total)
+		total = 1;
+	len = snprintf(line, sizeof line, "init: stats: %.1f C, %ld MHz, load %.1f%% (irq %.1f%%, softirq %.1f%%), %s, top:",
+		       temp / 1000.0, khz / 1000, 100.0 * busy / total,
+		       100.0 * (cpu[5] - prev_cpu[5]) / total, 100.0 * (cpu[6] - prev_cpu[6]) / total,
+		       idle ? "idle" : "active");
+
+	/* A process missing from prev started during the minute. */
+	for (int i = 0; i < ncur; i++) {
+		delta[i] = cur[i].ticks;
+		for (int j = 0; j < nprev; j++)
+			if (prev[j].pid == cur[i].pid) {
+				delta[i] = cur[i].ticks >= prev[j].ticks ? cur[i].ticks - prev[j].ticks : 0;
+				break;
+			}
+	}
+	span = (t - prev_t) * hz;
+	for (int k = 0; k < STATS_TOP && len < (int)sizeof line; k++) {
+		int best = -1;
+
+		for (int i = 0; i < ncur; i++)
+			if (delta[i] && (best < 0 || delta[i] > delta[best]))
+				best = i;
+		if (best < 0)
+			break;
+		len += snprintf(line + len, sizeof line - len, "%s %s %.1f%%", k ? "," : "",
+				cur[best].comm, 100.0 * delta[best] / span);
+		delta[best] = 0;
+	}
+	fprintf(stderr, "%s\n", line);
+keep:
+	memcpy(prev, cur, ncur * sizeof cur[0]);
+	nprev = ncur;
+	memcpy(prev_cpu, cpu, sizeof cpu);
+	prev_t = t;
+}
+
+static void go_idle(void)
+{
+	if (idle)
+		return;
+	set_governor("powersave");
+	idle = 1;
+	fprintf(stderr, "init: idle, CPUs on powersave\n");
+}
+
+static void wake(void)
+{
+	if (!idle)
+		return;
+	set_governor("performance");
+	idle = 0;
+	fprintf(stderr, "init: awake, CPUs on performance\n");
+}
+
+static void kill_hung_scsynth(void)
+{
+	struct service *s = &services[0];	/* scsynth */
+
+	if (!s->pid || now() - s->started < HUNG_GRACE)
+		return;
+	fprintf(stderr, "init: scsynth (pid %d) hung, killing it\n", (int)s->pid);
+	kill(s->pid, SIGKILL);
+}
+
 static void led(const char *trigger)
 {
 	write_file("/sys/class/leds/ACT/trigger", trigger);
@@ -310,10 +505,7 @@ static void setup_system(void)
 		start_logger();
 	}
 
-	for (int cpu = 0; cpu < 4; cpu++) {
-		snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor", cpu);
-		write_file(path, "performance");
-	}
+	set_governor("performance");
 	if_config("lo", NULL);
 	net_ip = getenv("mc_ip") ? getenv("mc_ip") : "10.0.0.2/24";
 	if (!strcmp(net_ip, "off"))
@@ -423,6 +615,9 @@ static void reap(void)
 			else
 				fprintf(stderr, "init: %s exited with %d\n", s->name, WEXITSTATUS(st));
 			s->pid = 0;
+			/* A new midid doesn't know we're idle, so it would never wake us. */
+			if (!strcmp(s->name, "midid"))
+				wake();
 			if (t - s->started < 5) {
 				s->backoff = s->backoff ? s->backoff * 2 : 1;
 				if (s->backoff > 30)
@@ -438,10 +633,17 @@ static void reap(void)
 int main(void)
 {
 	sigset_t set;
+	double next_stats = now() + STATS_PERIOD;
+	char pid[16];
+	int sig;
 
 	data_dir = getenv("MC_DATA") ? getenv("MC_DATA") : "/data";
 	if (getpid() == 1)
 		setup_system();
+	/* midid only sends its idle signals to the init that started it. */
+	snprintf(pid, sizeof pid, "%d", (int)getpid());
+	setenv("MC_INIT_PID", pid, 1);
+	log_stats();		/* the baseline for the first line */
 	if (!getenv("SC_SYNTHDEF_PATH")) {
 		char path[512];
 
@@ -453,6 +655,9 @@ int main(void)
 	sigemptyset(&set);
 	sigaddset(&set, SIGCHLD);
 	sigaddset(&set, SIGHUP);
+	sigaddset(&set, SIGUSR1);
+	sigaddset(&set, SIGUSR2);
+	sigaddset(&set, SIGRTMIN);
 	sigprocmask(SIG_BLOCK, &set, NULL);
 	if (getpid() == 1)
 		led("heartbeat");
@@ -463,6 +668,10 @@ int main(void)
 		struct timespec ts;
 
 		poll_network();
+		if (t >= next_stats) {
+			log_stats();
+			next_stats = t + STATS_PERIOD;
+		}
 		if (log_rd >= 0 && !logger_pid) {
 			if (t >= logger_next)
 				start_logger();
@@ -482,7 +691,14 @@ int main(void)
 
 		ts.tv_sec = (time_t)wait;
 		ts.tv_nsec = (long)((wait - ts.tv_sec) * 1e9);
-		if (sigtimedwait(&set, NULL, &ts) == SIGHUP) {
+		sig = sigtimedwait(&set, NULL, &ts);
+		if (sig == SIGUSR1)
+			go_idle();
+		else if (sig == SIGUSR2)
+			wake();
+		else if (sig == SIGRTMIN)
+			kill_hung_scsynth();
+		if (sig == SIGHUP) {
 			fprintf(stderr, "init: SIGHUP, restarting services\n");
 			for (size_t i = 0; i < NSERVICES; i++)
 				if (services[i].restart_on_hup && services[i].pid)
